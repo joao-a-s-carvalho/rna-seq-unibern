@@ -1,0 +1,210 @@
+```{r}
+# BiocManager::install("DESeq2") --> installing deseq for the current version of R
+library("DESeq2")
+library("ggplot2")
+library("clusterProfiler")
+library("org.Hs.eg.db")
+library("enrichplot")
+library("biomaRt")
+
+my_file = "breast_cancer2_featurecounts.txt"
+my_df = read.table(file = my_file, sep = '\t', header = TRUE)
+```
+```{r}
+#Cheking package versions
+packageVersion("org.Hs.eg.db")
+```
+
+
+
+```{r}
+#Editing the sample names from featurecounts file
+new_name_list = gsub(x=colnames(my_df), pattern = "X.data.courses.rnaseq.summer_practical.joao_rnaseq.mapping.STAR.", replacement = "")
+new_name_list = gsub(x=new_name_list, pattern = "_star_alignAligned.sortedByCoord.out.bam", replacement = "")
+colnames(my_df) = new_name_list
+
+#Selecting only the the gene IDs and sample counts cols
+my_df = my_df[,c(1,7:length(colnames(my_df)))]
+
+#Making Geneid into index
+rownames(my_df) = my_df$Geneid
+my_df$Geneid <- NULL
+
+head(my_df)
+```
+
+
+```{r}
+#Creating a reference df indicating which samples belong to which experimental group
+id = c(colnames(my_df))
+CancerType = substr(x = id, start = 1, stop = 4)
+
+reference_df = data.frame(id, CancerType)
+reference_df
+```
+
+
+```{r}
+#Formating the data with a reference df before deseq2 analysis
+des_obj = DESeqDataSetFromMatrix(countData = my_df, 
+                                 colData = reference_df,
+                                 design =~ CancerType)
+
+#Running the differential expression analysis
+des_obj = DESeq(des_obj, parallel = TRUE)
+```
+
+```{r}
+#Extracting and checking the results
+results_obj = results(des_obj)
+summary(results_obj)
+head(results_obj)
+```
+
+```{r}
+results_df = data.frame(results_obj)
+results_df = results_df[!is.na(results_df$padj),]
+
+results_df$MinusPadjLog = -log(results_df$padj)
+head(results_df)
+
+ggplot(data = results_df, aes(x = log2FoldChange, y = MinusPadjLog, )) +
+  geom_point() +
+  geom_point(data = results_df[(results_df$padj <= 0.05), ], 
+             aes(x = log2FoldChange, y = MinusPadjLog), color = "royalblue3") + 
+  geom_point(data = results_df[(results_df$padj <= 0.05) & (abs(results_df$log2FoldChange) >= 1), ], 
+             aes(x = log2FoldChange, y = MinusPadjLog), color = "red3")
+
+```
+```{r}
+
+```
+
+
+```{r}
+#Ploting counts of the gene with smallest padjust value
+#plotCounts(des_obj, gene=which.min(results_obj$padj), intgroup="CancerType")
+plotCounts(des_obj, gene="ENSG00000113140", intgroup="CancerType")
+plotCounts(des_obj, gene="ENSG00000166710", intgroup="CancerType")
+
+
+#Checking foldchange in the df
+results_obj[which.min(results_obj$padj),]
+
+```
+
+
+```{r}
+#Statistical preparation for PCA analysis
+des_vst_obj = vst(des_obj, blind=TRUE)
+
+plotPCA(des_vst_obj, intgroup="CancerType",) +
+  geom_text(aes(label = id), position = position_nudge(y = 3))
+```
+```{r}
+
+rv <- rowVars(assay(des_vst_obj))
+select <- order(rv, decreasing=TRUE)[seq_len(min(500, length(rv)))]
+pca <- prcomp(t(assay(des_vst_obj)[select,]))
+percentVar <- pca$sdev^2 / sum( pca$sdev^2 )
+
+scree_plot=data.frame(percentVar)
+scree_plot[,2]<- c(1:6)
+colnames(scree_plot)<-c("variance","component_number")
+ggplot(scree_plot, mapping=aes(x=component_number, y=variance))+geom_bar(stat="identity")
+
+```
+
+
+```{r}
+#Getting the gene names from the Ensembl IDs
+
+ensembl = useMart(biomart="ensembl", dataset="hsapiens_gene_ensembl")
+biom_conversion = getBM(attributes = c("hgnc_symbol", "ensembl_gene_id"),
+                        filters = "ensembl_gene_id", values = row.names(results_df),
+                        mart = ensembl)
+
+biom_conversion
+```
+
+
+```{r}
+#Merging the gene names back into the results df
+results_gene_names_df = merge(results_df, biom_conversion, by.x="row.names" , by.y="ensembl_gene_id")
+head(results_gene_names_df)
+```
+```{r}
+significant_results_df = results_df[results_df$padj <= 0.05,]
+#Overexpressed genes
+results_df[(results_df$padj <= 0.05) & (results_df$log2FoldChange > 1),]
+
+#Underexpressed genes
+results_df[(results_df$padj <= 0.05) & (results_df$log2FoldChange < 1),]
+```
+
+
+```{r}
+#Running GO analysis for all ontology terms
+
+go_enrich_list = list()
+
+for (i in c('BP', 'MF', 'CC', 'ALL')) {
+
+  ggo = enrichGO(gene = row.names(significant_results_df),
+               universe = row.names(results_df),
+               OrgDb = org.Hs.eg.db,
+               ont = i,
+               keyType = "ENSEMBL",
+               pvalueCutoff  = 0.01,
+               qvalueCutoff  = 0.05,
+               readable = TRUE)
+  
+  go_enrich_list[[i]]=(ggo)
+}
+
+```
+
+```{r}
+#Ploting ontology graphs separately 
+counter = 0
+
+for (i in go_enrich_list) {
+  
+  counter =  counter + 1
+  if (counter == 4) {break}
+  
+  print(dotplot(i, showCategory = 20))
+  print(mutate(i, qscore = -log(p.adjust, base=10)) %>% barplot(x="qscore"))
+}
+  
+```
+```{r,fig.height=12, fig.width=12}
+#Ploting ontology graphs together 
+
+dotplot(go_enrich_list$ALL, showCategory = 40) +
+  facet_wrap(.~ONTOLOGY)
+mutate(go_enrich_list$ALL, qscore = -log(p.adjust, base=10)) %>% barplot(x="qscore") +
+  facet_wrap(.~ONTOLOGY)
+```
+```{r}
+  ggo = enrichGO(gene = row.names(significant_results_df),
+               universe = row.names(results_df),
+               OrgDb = org.Hs.eg.db,
+               ont = "BP",
+               keyType = "ENSEMBL",
+               pvalueCutoff  = 0.01,
+               qvalueCutoff  = 0.05,
+               readable = TRUE)
+  
+
+```
+```{r}
+
+
+```
+
+```{r}
+
+
+```
+
